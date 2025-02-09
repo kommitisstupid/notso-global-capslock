@@ -3,8 +3,43 @@ import websockets
 import json
 from websockets.exceptions import ConnectionClosedError, WebSocketException
 import platform
+import glob
 
-if platform.system() == "Windows":
+if platform.system() == "Darwin":
+    from Quartz import CGEventSourceKeyState, kCGEventSourceStateHIDSystemState
+    import subprocess
+
+    def get_capslock_state():
+        return bool(CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, 0x39))
+
+    # huge thank you to https://github.com/erikpt/caps-lock-shell-script for showing me how to do this
+    def set_capslock_state(enabled):
+        script = """
+        ObjC.import("IOKit");
+        ObjC.import("CoreServices");
+        (() => {
+            var ioConnect = Ref();
+            var state = Ref();
+            $.IOServiceOpen(
+                $.IOServiceGetMatchingService(
+                    $.kIOMasterPortDefault,
+                    $.IOServiceMatching($.kIOHIDSystemClass)
+                ),
+                $.mach_task_self_,
+                $.kIOHIDParamConnectType,
+                ioConnect
+            );
+            $.IOHIDSetModifierLockState(ioConnect, $.kIOHIDCapsLockState, %d);
+            $.IOServiceClose(ioConnect);
+        })();
+        """ % (
+            1 if enabled else 0
+        )
+        subprocess.run(["osascript", "-l", "JavaScript", "-e", script])
+
+    def check_dependencies():
+        pass
+elif platform.system() == "Windows":
     import ctypes
     from ctypes import wintypes
 
@@ -39,8 +74,38 @@ if platform.system() == "Windows":
         if current != enabled:
             toggle_capslock()
 
+    def check_dependencies():
+        pass
+elif platform.system().lower().startswith("linux"):
+    import shutil
+    import subprocess
+
+    def check_dependencies():
+        commands = ["xdotool"]
+        missing = []
+        for c in commands:
+            if shutil.which(c) is None:
+                missing.append(c)
+
+        if missing:
+            l = ", ".join(missing)
+            raise NotImplementedError(f"Missing dependencies ({l}) - install xdotool using your package manager")
+
+    def get_capslock_state():
+        pattern = "/sys/class/leds/input*::capslock/brightness"
+        files = glob.glob(pattern)
+        if len(files) == 0:
+            raise RuntimeError(f"Could not find anything matching {pattern} to check caps lock status!")
+        with open(files[0]) as f:
+            return f.read().strip() == "1"
+
+    def set_capslock_state(enabled):
+        state = get_capslock_state()
+        if state != enabled:
+            subprocess.run(["xdotool", "key", "Caps_Lock+Caps_Lock"], check=True)
 else:
-    raise NotImplementedError(f"Unsupported platform: {platform.system()}")
+    plat = platform.system()
+    raise NotImplementedError(f"Unsupported platform: {plat}")
 
 
 async def get_latest_message(websocket):
@@ -58,6 +123,8 @@ async def get_latest_message(websocket):
 
 
 async def run_client():
+    #uri = "ws://localhost:8000/ws"
+    #uri = "wss://globalcapslock.com/ws"
     uri = "wss://notso-global-capslock-production.up.railway.app/ws"
 
     async with websockets.connect(uri) as websocket:
@@ -118,4 +185,5 @@ async def run_client_loop():
 
 
 if __name__ == "__main__":
+    check_dependencies()
     asyncio.run(run_client_loop())
